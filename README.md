@@ -101,3 +101,9 @@ If you're hitting a gap in a Fivetran built-in connector and want help building 
 - [Connector SDK Technical Reference](https://fivetran.com/docs/connector-sdk/technical-reference)
 - [Connector SDK Best Practices](https://fivetran.com/docs/connector-sdk/best-practices)
 - [Connector SDK GitHub](https://github.com/fivetran/fivetran_connector_sdk)
+
+---
+
+## License
+
+[MIT](./LICENSE) © Autonomous Minds

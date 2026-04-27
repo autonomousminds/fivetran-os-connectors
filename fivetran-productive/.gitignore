@@ -1,0 +1,8 @@
+configuration*.json
+files/
+warehouse.db
+__pycache__/
+*.pyc
+.DS_Store
+.vscode/
+.claude/

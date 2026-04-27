@@ -1,0 +1,2 @@
+fivetran-connector-sdk
+requests>=2.28.0

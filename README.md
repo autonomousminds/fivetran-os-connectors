@@ -22,8 +22,8 @@ These OS connectors fill those gaps. Every one of them is feature-complete again
 
 | Connector | Source | Tables | Why it exists |
 |-----------|--------|--------|---------------|
-| [`fivetran-xero/`](./fivetran-xero) | [Xero](https://developer.xero.com/) Accounting + UK Payroll | **81** | Built-in Fivetran Xero supports only Australian payroll — this adds full **UK Payroll** (29 tables) on top of the 52 accounting tables |
-| [`fivetran-productive/`](./fivetran-productive) | [Productive.io](https://developer.productive.io/) | **91** | Built-in Fivetran Productive **does not sync salaries** and is missing 20+ tables (contracts, memberships, entitlements, proposals, purchase orders, bills, overheads, etc.) |
+| [`xero/`](./xero) | [Xero](https://developer.xero.com/) Accounting + UK Payroll | **81** | Built-in Fivetran Xero supports only Australian payroll — this adds full **UK Payroll** (29 tables) on top of the 52 accounting tables |
+| [`productive/`](./productive) | [Productive.io](https://developer.productive.io/) | **91** | Built-in Fivetran Productive **does not sync salaries** and is missing 20+ tables (contracts, memberships, entitlements, proposals, purchase orders, bills, overheads, etc.) |
 | [`toast/`](./toast) | [Toast POS](https://doc.toasttab.com/) Standard API | **55** | The [Fivetran community Toast connector](https://github.com/fivetran/fivetran_connector_sdk/tree/main/connectors/toast) ships only ~35 tables — this adds Menu v2, inventory, extended configuration, restaurant detail, and tip withholding |
 
 Each subdirectory has its own README with quick-start instructions, the full table list, and a feature-parity comparison against the corresponding built-in or community Fivetran connector.
@@ -34,7 +34,7 @@ Each subdirectory has its own README with quick-start instructions, the full tab
 
 All connectors in this repo follow the same shape so you can move between them quickly:
 
-- **Python 3.12** in a conda env (one env per connector — names are `fivetran-xero`, `fivetran-productive`, `fivetran-toast`)
+- **Python 3.12** in a single shared conda env named `fivetran` (defined in [`environment.yml`](./environment.yml)) — works for every connector in this repo
 - **Local debug** via `python connector.py` → produces `files/warehouse.db` (DuckDB) for inspection
 - **Deployment** via `fivetran deploy --api-key … --destination … --connection … --configuration configuration.json`
 - **State checkpointing** at safe boundaries so syncs resume after interruption
@@ -50,17 +50,18 @@ The full set of conventions and design decisions is documented in [`CLAUDE.md`](
 
 ```bash
 git clone https://github.com/autonomousminds/fivetran-os-connectors.git
-cd fivetran-os-connectors/<connector>     # e.g. toast, fivetran-xero, fivetran-productive
+cd fivetran-os-connectors
+
+# one env covers every connector in this repo
+conda env create -f environment.yml
+conda activate fivetran
+
+cd <connector>                       # e.g. toast, xero, productive
 ```
 
-Then follow the connector's own README for credentials and environment setup. The flow is the same in every case:
+Then follow the connector's own README for credentials. The flow is the same in every case:
 
 ```bash
-conda create -n fivetran-<connector> python=3.12 -y
-conda activate fivetran-<connector>
-pip install fivetran-connector-sdk
-# add connector-specific deps (see its README / requirements.txt / environment.yml)
-
 # fill in configuration.json with credentials, then:
 python connector.py                  # local debug → files/warehouse.db
 

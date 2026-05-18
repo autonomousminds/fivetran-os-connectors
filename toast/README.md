@@ -23,23 +23,24 @@ Custom Fivetran connector that syncs **the full Toast Standard API surface** —
 
 ```bash
 git clone https://github.com/autonomousminds/fivetran-os-connectors.git
-cd fivetran-os-connectors/toast
+cd fivetran-os-connectors
 ```
 
 ### Step 2: Set up Python environment
 
-Using conda (recommended):
+One shared `fivetran` conda env (defined at the repo root) covers every connector in this repo:
 ```bash
-conda create -n fivetran-toast python=3.12 -y
-conda activate fivetran-toast
-pip install fivetran-connector-sdk requests cryptography
+conda env create -f environment.yml
+conda activate fivetran
+cd toast
 ```
 
 Or using pip/venv:
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install fivetran-connector-sdk requests -r requirements.txt
+pip install fivetran-connector-sdk requests -r toast/requirements.txt
+cd toast
 ```
 
 ### Step 3: Get Toast API credentials

@@ -143,12 +143,15 @@ def get_access_token(config: dict, scope_group: str = "accounting") -> str:
 def is_payroll_available(config: dict) -> bool:
     """
     Test whether the Xero app has any payroll scopes authorised AND
-    the org's Custom Connection actually grants payroll API access.
+    the org's Custom Connection actually grants payroll API access AND
+    the connected organisation has Xero Payroll provisioned.
 
-    Xero can issue a valid OAuth token with payroll scopes even when
-    the Custom Connection hasn't been re-authorized to include payroll.
-    In that case the token works but every API call returns 403.
-    We probe /Settings once to detect this before trying all endpoints.
+    Xero can issue a valid OAuth token with payroll scopes even when:
+      - the Custom Connection hasn't been re-authorized to include payroll
+        (token works, API returns 403), or
+      - the connected organisation doesn't have Xero Payroll provisioned
+        (token works, API returns 401 with a provisioning message).
+    We probe /Settings once to detect both cases before trying all endpoints.
     """
     scope_str = _resolve_scopes(config, "payroll")
     if not scope_str:
@@ -166,6 +169,17 @@ def is_payroll_available(config: dict) -> bool:
             "https://api.xero.com/payroll.xro/2.0/Settings",
             headers=headers, timeout=15,
         )
+        if resp.status_code == 200:
+            return True
+        if resp.status_code == 401:
+            log.warning(
+                "Payroll token obtained but API returned 401 Unauthorized. "
+                "The connected Xero organisation does not have Payroll "
+                "provisioned, or the connection lacks Payroll Administrator "
+                "permissions. Skipping all payroll tables. "
+                f"Detail: {resp.text[:300]}"
+            )
+            return False
         if resp.status_code == 403:
             log.warning(
                 "Payroll token obtained but API returned 403 Forbidden. "
@@ -175,7 +189,11 @@ def is_payroll_available(config: dict) -> bool:
                 "Skipping all payroll tables."
             )
             return False
-        return True
+        log.warning(
+            f"Payroll probe returned unexpected status {resp.status_code}. "
+            f"Skipping all payroll tables. Detail: {resp.text[:300]}"
+        )
+        return False
     except Exception as e:
         log.warning(f"Could not verify payroll access: {e}. Skipping payroll tables.")
         return False

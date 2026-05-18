@@ -21,16 +21,16 @@ Custom Fivetran connector that syncs **all Xero Accounting API data** plus **all
 
 ```bash
 git clone https://github.com/autonomousminds/fivetran-os-connectors.git
-cd fivetran-os-connectors/fivetran-xero
+cd fivetran-os-connectors
 ```
 
 ### Step 2: Set up Python environment
 
-Using conda (recommended):
+One shared `fivetran` conda env (defined at the repo root) covers every connector in this repo:
 ```bash
-conda create -n fivetran-xero python=3.12 -y
-conda activate fivetran-xero
-pip install fivetran-connector-sdk requests
+conda env create -f environment.yml
+conda activate fivetran
+cd xero
 ```
 
 Or using pip/venv:
@@ -38,6 +38,7 @@ Or using pip/venv:
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install fivetran-connector-sdk requests
+cd xero
 ```
 
 ### Step 3: Create a Xero Custom Connection App

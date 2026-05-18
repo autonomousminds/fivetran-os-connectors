@@ -24,17 +24,20 @@ Fivetran has a [built-in Productive connector](https://fivetran.com/docs/connect
 
 ```bash
 git clone https://github.com/autonomousminds/fivetran-os-connectors.git
-cd fivetran-os-connectors/fivetran-productive
+cd fivetran-os-connectors
 ```
 
 ### 2. Set up Python
 
+One shared `fivetran` conda env covers every connector in this repo:
+
 ```bash
 conda env create -f environment.yml
-conda activate fivetran-productive
+conda activate fivetran
+cd productive
 ```
 
-Or: `python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`
+Or: `python3.12 -m venv .venv && source .venv/bin/activate && pip install -r productive/requirements.txt && cd productive`
 
 ### 3. Configure
 

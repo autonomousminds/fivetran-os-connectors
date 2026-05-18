@@ -1,4 +1,4 @@
-name: fivetran-productive
+name: fivetran
 channels:
   - defaults
 dependencies:
@@ -7,3 +7,4 @@ dependencies:
   - pip:
       - fivetran-connector-sdk
       - requests>=2.28.0
+      - cryptography>=42

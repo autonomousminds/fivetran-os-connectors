@@ -28,7 +28,7 @@ The built-in Fivetran Xero connector does NOT sync UK Payroll data — this cust
 - **Table naming**: `accounting_*` and `payroll_*` prefixes to avoid collisions (both APIs have "Employees")
 
 ### Environment
-- **Conda env**: `conda activate fivetran-xero` (Python 3.12)
+- **Conda env**: `conda activate fivetran` (Python 3.12 — shared `fivetran` env defined in the repo-root `environment.yml`)
 - **Test**: `python connector.py` → creates `files/warehouse.db`
 - **Reset**: `rm -rf files/` to clear state and re-sync from scratch
 - **Deploy**: `fivetran deploy --api-key <key> --destination <dest> --connection xero_custom --configuration configuration.json`

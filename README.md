@@ -35,7 +35,7 @@ Each subdirectory has its own README with quick-start instructions, the full tab
 All connectors in this repo follow the same shape so you can move between them quickly:
 
 - **Python 3.12** in a single shared conda env named `fivetran` (defined in [`environment.yml`](./environment.yml)) — works for every connector in this repo
-- **Local debug** via `python connector.py` → produces `files/warehouse.db` (DuckDB) for inspection
+- **Local debug** via `python connector.py` or `fivetran debug --configuration configuration.json` → produces `files/warehouse.db` (DuckDB) for inspection
 - **Deployment** via `fivetran deploy --api-key … --destination … --connection … --configuration configuration.json`
 - **State checkpointing** at safe boundaries so syncs resume after interruption
 - **Direct `op.upsert()` / `op.delete()` / `op.checkpoint()`** — no `yield` (Connector SDK v2 pattern)
@@ -43,6 +43,31 @@ All connectors in this repo follow the same shape so you can move between them q
 - **`configuration.json` is gitignored** — credentials never go in the repo
 
 The full set of conventions and design decisions is documented in [`CLAUDE.md`](./CLAUDE.md).
+
+### Local testing on Apple Silicon (M1 / M2 / M3) — use `validate.py`
+
+The Fivetran SDK tester JAR (invoked by `fivetran debug` and `connector.debug()`)
+bundles an **x86_64 JVM and DuckDB JNI library**. Under Rosetta on Apple Silicon
+both crash after a few thousand upserts — `SIGSEGV` in `libduckdb_java*.so`
+(or `SIGBUS` in `libjvm`), with a `hs_err_pid*.log` dropped in the connector
+directory. This is an SDK packaging issue, not a connector bug: production
+Fivetran runs use a different runtime and are unaffected.
+
+Affected connectors ship a `validate.py` that monkey-patches
+`op.upsert/checkpoint/delete` to buffer in Python memory and then writes to
+`files/local_warehouse.db` using the native Python `duckdb` package — no JVM,
+no JNI, no crash. Same `update()` code path as production.
+
+```bash
+# Apple Silicon — use this instead of `python connector.py` / `fivetran debug`
+python validate.py
+duckdb files/local_warehouse.db -c "SHOW TABLES;"
+```
+
+Connectors that currently have a `validate.py`: [`harri/`](./harri/validate.py),
+[`breww/`](./breww/validate.py). On Linux or Intel Mac (and in CI / production)
+the standard `fivetran debug` path works fine — `validate.py` is only needed
+for local iteration on Apple Silicon.
 
 ---
 
@@ -64,6 +89,8 @@ Then follow the connector's own README for credentials. The flow is the same in 
 ```bash
 # fill in configuration.json with credentials, then:
 python connector.py                  # local debug → files/warehouse.db
+# OR on Apple Silicon (M1/M2/M3), if the connector ships a validate.py:
+python validate.py                   # → files/local_warehouse.db (bypasses crashy SDK JNI)
 
 fivetran deploy \
   --api-key YOUR_BASE64_API_KEY \

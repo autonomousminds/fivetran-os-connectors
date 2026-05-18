@@ -156,12 +156,46 @@ op.delete(table, keys)
 1. TESTING METHODS
 - Support CLI testing
 - CLI: `fivetran debug --configuration config.json`
+- Apple Silicon fallback: `python validate.py` (see "Apple Silicon SDK tester crashes" below)
 
 2. VALIDATION STEPS
-- Verify DuckDB warehouse.db output
+- Verify DuckDB warehouse.db output (or `local_warehouse.db` if validate.py was used)
 - Check operation counts
 - Validate data completeness
 - Review logs for errors
+
+### Apple Silicon SDK tester crashes — when to add `validate.py`
+
+The Fivetran SDK tester JAR invoked by `fivetran debug` and
+`connector.debug()` bundles an **x86_64 JVM + DuckDB JNI library** that crash
+under Rosetta on Apple Silicon after a few thousand upserts (`SIGSEGV` in
+`libduckdb_java*.so` or `SIGBUS` in `libjvm`, with `hs_err_pid*.log` dropped
+in the working directory). This is an SDK packaging issue, **not** a
+connector bug — production Fivetran runs on a different runtime and are
+unaffected, so `fivetran deploy` works fine even when local debug crashes.
+
+When a user reports any of these symptoms on macOS:
+- `SIGSEGV` / `SIGBUS` / "Fatal error detected by the Java Runtime Environment"
+- `hs_err_pid*.log` appearing in the connector directory
+- `libduckdb_java*.so`, `libjvm`, `nmethodLocker::lock_nmethod`, or
+  `CodeHeap::allocate` in the crash report
+- `fivetran debug` dying partway through a large table
+
+…add a `validate.py` to the connector if one isn't already there. It
+monkey-patches `op.upsert/checkpoint/delete` to buffer in Python memory
+and then writes everything to `files/local_warehouse.db` via the native
+Python `duckdb` package — no JVM, no JNI, no crash. Same `update()` code
+path as production.
+
+Reference implementations: [`harri/validate.py`](./harri/validate.py),
+[`breww/validate.py`](./breww/validate.py). Both are ~150 lines and
+mostly identical — the only per-connector changes are how
+`configuration.json` is loaded and which sample inspection queries are
+printed at the end.
+
+`validate.py` is for local development on Apple Silicon only. The
+Operational Rules above still apply: **never run it on the user's behalf**
+— hand the `python validate.py` command back and stop.
 
 ## Best Practices Enforcement
 

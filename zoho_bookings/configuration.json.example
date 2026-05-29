@@ -1,0 +1,11 @@
+{
+    "client_id": "1000.XXXXXXXXXXXXXXXXXXXXXX",
+    "client_secret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "refresh_token": "1000.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.xxxxxxxxxxxxxxxxxxxx",
+    "data_center": "eu",
+    "workspaces": "",
+    "appointments_past_window_days": "365",
+    "appointments_future_window_days": "365",
+    "appointments_per_page": "100",
+    "bookings_has_custom_fields": "false"
+}

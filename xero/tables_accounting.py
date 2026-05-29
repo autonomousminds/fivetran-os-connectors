@@ -188,7 +188,12 @@ def sync_tax_rates(config, state):
 
 
 def sync_tracking_categories(config, state):
-    records = fetch_all_no_pagination(config, "/TrackingCategories", "TrackingCategories")
+    # Default Xero behavior is ACTIVE-only. Old invoice line items can
+    # reference ARCHIVED categories, so include them to satisfy the join.
+    from api_client import ACCOUNTING_BASE, api_request
+    data = api_request(config, f"{ACCOUNTING_BASE}/TrackingCategories",
+                       params={"includeArchived": "true"}, scope_group="accounting")
+    records = data.get("TrackingCategories", [])
     for record in records:
         options = record.pop("Options", [])
         _upsert(table="accounting_tracking_category", data=record)
@@ -198,9 +203,18 @@ def sync_tracking_categories(config, state):
 
 
 def sync_contact_groups(config, state):
-    records = fetch_all_no_pagination(config, "/ContactGroups", "ContactGroups")
-    for record in records:
-        group_id = record.get("ContactGroupID", "")
+    # /ContactGroups list returns summary rows without the Contacts array.
+    # We must call /ContactGroups/{ID} per group to get member contacts.
+    summary = fetch_all_no_pagination(config, "/ContactGroups", "ContactGroups")
+    for s in summary:
+        group_id = s.get("ContactGroupID", "")
+        if not group_id:
+            continue
+        detail = fetch_single(config, f"/ContactGroups/{group_id}")
+        groups = detail.get("ContactGroups", []) or []
+        if not groups:
+            continue
+        record = groups[0]
         contacts = record.pop("Contacts", [])
         record.pop("ValidationErrors", None)
         _upsert(table="accounting_contact_group", data=record)
@@ -270,8 +284,18 @@ def sync_contacts(config, state):
     latest = modified_since
     count = 0
 
+    # includeArchived=true so we get archived contacts too — without it,
+    # /Contacts returns ACTIVE-only and the built-in connector's row count
+    # is ~13% higher than ours (848 archived contacts on this org).
+    # order=UpdatedDateUTC ASC: oldest records first. If the sync is
+    # interrupted by the daily rate limit, the cursor sits at the latest
+    # UpdatedDateUTC of records processed so far, and the next run resumes
+    # from there with no gap. Without explicit ordering, pages can arrive
+    # in any order and partial syncs can skip historic records permanently.
     records = fetch_all_pages(config, "/Contacts", "Contacts",
-                              modified_since=modified_since)
+                              modified_since=modified_since,
+                              params_extra={"includeArchived": "true",
+                                            "order": "UpdatedDateUTC ASC"})
 
     for record in records:
         updated = convert_xero_date(record.get("UpdatedDateUTC", ""))
@@ -315,7 +339,8 @@ def sync_bank_transactions(config, state):
     count = 0
 
     records = fetch_all_pages(config, "/BankTransactions", "BankTransactions",
-                              modified_since=modified_since)
+                              modified_since=modified_since,
+                              params_extra={"order": "UpdatedDateUTC ASC"})
 
     for record in records:
         record_id = record.get("BankTransactionID", "")
@@ -356,7 +381,8 @@ def sync_bank_transactions(config, state):
                     {"BankTransactionID": record_id}, status)
 
         _process_line_items(line_items, "BankTransactionID", record_id,
-                           "accounting_bank_transaction_line_item")
+                           "accounting_bank_transaction_line_item",
+                           "accounting_bank_transaction_line_item_tracking")
 
         count += 1
         if count % CHECKPOINT_INTERVAL == 0:
@@ -429,8 +455,12 @@ def sync_credit_notes(config, state):
     latest = modified_since
     count = 0
 
-    records = fetch_all_no_pagination(config, "/CreditNotes", "CreditNotes",
-                                      modified_since=modified_since)
+    # Use paginated fetch — Xero's /CreditNotes returns summary records
+    # (no LineItems) when called without a `page` parameter. Paginating
+    # gives the full record including LineItems.
+    records = fetch_all_pages(config, "/CreditNotes", "CreditNotes",
+                              modified_since=modified_since,
+                              params_extra={"order": "UpdatedDateUTC ASC"})
 
     for record in records:
         record_id = record.get("CreditNoteID", "")
@@ -519,7 +549,8 @@ def sync_invoices(config, state):
     count = 0
 
     records = fetch_all_pages(config, "/Invoices", "Invoices",
-                              modified_since=modified_since)
+                              modified_since=modified_since,
+                              params_extra={"order": "UpdatedDateUTC ASC"})
 
     for record in records:
         record_id = record.get("InvoiceID", "")
@@ -641,7 +672,8 @@ def sync_manual_journals(config, state):
     latest = modified_since
 
     records = fetch_all_pages(config, "/ManualJournals", "ManualJournals",
-                              modified_since=modified_since)
+                              modified_since=modified_since,
+                              params_extra={"order": "UpdatedDateUTC ASC"})
 
     for record in records:
         record_id = record.get("ManualJournalID", "")
@@ -662,8 +694,13 @@ def sync_manual_journals(config, state):
             # ManualJournalLines don't have LineItemID — generate one
             if "LineItemID" not in line:
                 line["LineItemID"] = str(idx)
-            line.pop("Tracking", None)
+            tracking = line.pop("Tracking", []) or []
             _upsert(table="accounting_manual_journal_line", data=line)
+            if tracking:
+                _upsert_tracking(
+                    tracking, "accounting_manual_journal_line_tracking",
+                    {"ManualJournalID": record_id, "LineItemID": line["LineItemID"]},
+                )
 
     if latest:
         state[cursor_key] = latest
@@ -674,8 +711,11 @@ def sync_overpayments(config, state):
     modified_since = state.get(cursor_key)
     latest = modified_since
 
-    records = fetch_all_no_pagination(config, "/Overpayments", "Overpayments",
-                                      modified_since=modified_since)
+    # Use paginated fetch — Xero returns summary records (no LineItems)
+    # without the `page` parameter; paginating gives full records.
+    records = fetch_all_pages(config, "/Overpayments", "Overpayments",
+                              modified_since=modified_since,
+                              params_extra={"order": "UpdatedDateUTC ASC"})
 
     for record in records:
         record_id = record.get("OverpaymentID", "")
@@ -690,7 +730,8 @@ def sync_overpayments(config, state):
         _upsert(table="accounting_overpayment", data=record)
 
         _process_line_items(line_items, "OverpaymentID", record_id,
-                           "accounting_overpayment_line_item")
+                           "accounting_overpayment_line_item",
+                           "accounting_overpayment_line_item_tracking")
 
         if allocations:
             _upsert_allocations(allocations, record_id, "Overpayment")
@@ -767,8 +808,11 @@ def sync_prepayments(config, state):
     modified_since = state.get(cursor_key)
     latest = modified_since
 
-    records = fetch_all_no_pagination(config, "/Prepayments", "Prepayments",
-                                      modified_since=modified_since)
+    # Use paginated fetch — Xero returns summary records (no LineItems)
+    # without the `page` parameter; paginating gives full records.
+    records = fetch_all_pages(config, "/Prepayments", "Prepayments",
+                              modified_since=modified_since,
+                              params_extra={"order": "UpdatedDateUTC ASC"})
 
     for record in records:
         record_id = record.get("PrepaymentID", "")
@@ -783,7 +827,8 @@ def sync_prepayments(config, state):
         _upsert(table="accounting_prepayment", data=record)
 
         _process_line_items(line_items, "PrepaymentID", record_id,
-                           "accounting_prepayment_line_item")
+                           "accounting_prepayment_line_item",
+                           "accounting_prepayment_line_item_tracking")
 
         if allocations:
             _upsert_allocations(allocations, record_id, "Prepayment")
@@ -798,8 +843,10 @@ def sync_purchase_orders(config, state):
     latest = modified_since
     count = 0
 
-    records = fetch_all_no_pagination(config, "/PurchaseOrders", "PurchaseOrders",
-                                      modified_since=modified_since)
+    # Paginated — without `page` Xero returns summary records (no LineItems).
+    records = fetch_all_pages(config, "/PurchaseOrders", "PurchaseOrders",
+                              modified_since=modified_since,
+                              params_extra={"order": "UpdatedDateUTC ASC"})
 
     for record in records:
         record_id = record.get("PurchaseOrderID", "")
@@ -914,8 +961,6 @@ def sync_users(config, state):
 
 ACCOUNTING_REFERENCE_SYNCS = [
     sync_organisation,  # also syncs accounting_settings in the same API call
-    sync_assets,
-    sync_asset_types,
     sync_branding_themes,
     sync_currencies,
     sync_tax_rates,
@@ -932,10 +977,8 @@ ACCOUNTING_INCREMENTAL_SYNCS = [
     sync_batch_payments,
     sync_credit_notes,
     sync_employees,
-    sync_expense_claims,
     sync_invoices,
     sync_items,
-    sync_journals,
     sync_linked_transactions,
     sync_manual_journals,
     sync_overpayments,
@@ -943,6 +986,22 @@ ACCOUNTING_INCREMENTAL_SYNCS = [
     sync_prepayments,
     sync_purchase_orders,
     sync_quotes,
-    sync_receipts,
     sync_users,
 ]
+
+# accounting.journals.read is premium-gated post-April 2026 (Advanced tier
+# + security review + use-case approval). Gated by is_journals_available()
+# in connector.py — only included when the org has API access to /Journals.
+JOURNALS_SYNCS = [sync_journals]
+
+# Fixed Assets API. assets.read is bundled into the accounting token (same
+# auth.xero.com identity), but the API itself returns 403 when the connected
+# org doesn't have the Fixed Assets feature enabled. Gated by
+# is_assets_available() in connector.py.
+ASSETS_SYNCS = [sync_assets, sync_asset_types]
+
+# ExpenseClaims and Receipts endpoints are deprecated by Xero — they live
+# under the legacy accounting.classicexpenses scope which most Custom
+# Connections won't have. Kept here so syncs work for orgs that DO have it,
+# but excluded from the default sync list.
+DEPRECATED_EXPENSE_SYNCS = [sync_expense_claims, sync_receipts]

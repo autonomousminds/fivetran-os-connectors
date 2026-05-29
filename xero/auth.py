@@ -4,6 +4,24 @@ OAuth2 token management for Xero Custom Connection apps.
 Uses client_credentials grant type — no user authorization or
 refresh tokens needed. The app is pre-authorized to a single org.
 
+Xero migrated from broad scopes (accounting.transactions,
+accounting.reports.read) to granular ones effective 2 March 2026 (new apps)
+and rolled out to all apps by end of April 2026. This module uses the
+new granular scope names exclusively.
+
+Scope-group token cache: one token per (scope_group) keyed by the resolved
+scope string. Scope groups:
+  - "accounting" — bundle of all accounting + reports + assets scopes
+                   (single token covers Accounting + Assets + Reports
+                   endpoints — they share api.xero.com auth).
+  - "journals"   — accounting.journals.read only. Premium-gated (Advanced
+                   tier + security review + use-case approval). Probed
+                   separately so the connector gracefully skips Journals
+                   sync when the scope isn't authorised.
+  - "files"      — files.read for the Files API.
+  - "projects"   — projects.read for the Projects API.
+  - "payroll"    — payroll.* read scopes (UK Payroll).
+
 On first token request per scope group, tries all scopes at once.
 If Xero returns invalid_scope, probes each scope individually and
 uses only the granted ones. Missing scopes are logged as warnings.
@@ -14,17 +32,49 @@ import time
 import requests
 from fivetran_connector_sdk import Logging as log
 
+from exceptions import DailyRateLimitExceeded
+
 TOKEN_URL = "https://identity.xero.com/connect/token"
 CONNECTIONS_URL = "https://api.xero.com/connections"
 
+# Granular Accounting API scopes (replaces deprecated accounting.transactions.read
+# and accounting.reports.read umbrella scopes). Bundled into one token because
+# they all hit api.xero.com.
 ACCOUNTING_SCOPES = [
-    "accounting.transactions.read",
-    "accounting.settings.read",
-    "accounting.contacts.read",
-    "accounting.journals.read",
-    "accounting.attachments.read",
+    # Core data
+    "accounting.banktransactions.read",   # BankTransactions, BankTransfers
+    "accounting.invoices.read",           # Invoices, CreditNotes, LinkedTransactions,
+                                          # Quotes, PurchaseOrders, RepeatingInvoices, Items
+    "accounting.payments.read",           # Payments, BatchPayments, Overpayments, Prepayments
+    "accounting.manualjournals.read",     # ManualJournals
+    "accounting.contacts.read",           # Contacts, ContactGroups
+    "accounting.settings.read",           # Accounts, BrandingThemes, Currencies,
+                                          # Items, Organisation, TaxRates,
+                                          # TrackingCategories, Users
+    "accounting.attachments.read",        # Attachments
+    "accounting.budgets.read",            # Budgets
+    # Reports (granular — one scope per report)
+    "accounting.reports.aged.read",            # AgedPayablesByContact, AgedReceivablesByContact
+    "accounting.reports.balancesheet.read",    # BalanceSheet
+    "accounting.reports.banksummary.read",     # BankSummary
+    "accounting.reports.budgetsummary.read",   # BudgetSummary
+    "accounting.reports.executivesummary.read",  # ExecutiveSummary
+    "accounting.reports.profitandloss.read",   # ProfitAndLoss
+    "accounting.reports.trialbalance.read",    # TrialBalance
+    "accounting.reports.taxreports.read",      # GST/BAS reports
+    "accounting.reports.tenninetynine.read",   # 1099 (US)
+    # Assets API — shares auth.xero.com host, can be bundled
     "assets.read",
 ]
+
+# accounting.journals.read is premium-gated post-April 2026
+# (Advanced pricing tier + security assessment + use-case approval).
+# Kept separate so we can probe-and-skip without blocking the rest.
+JOURNALS_SCOPES = ["accounting.journals.read"]
+
+FILES_SCOPES = ["files.read"]
+
+PROJECTS_SCOPES = ["projects.read"]
 
 PAYROLL_SCOPES = [
     "payroll.employees.read",
@@ -34,10 +84,18 @@ PAYROLL_SCOPES = [
     "payroll.payslip.read",
 ]
 
-# Per-scope-group token cache: {"accounting": (token, expiry), "payroll": (token, expiry)}
+_SCOPE_LISTS = {
+    "accounting": ACCOUNTING_SCOPES,
+    "journals": JOURNALS_SCOPES,
+    "files": FILES_SCOPES,
+    "projects": PROJECTS_SCOPES,
+    "payroll": PAYROLL_SCOPES,
+}
+
+# Per-scope-group token cache: {scope_group: (token, expiry_epoch)}
 _tokens = {}
 _tenant_id = None
-# Resolved scope strings after probing: {"accounting": "scope1 scope2", "payroll": "scope1 scope2"}
+# Resolved scope strings after probing: {scope_group: "scope1 scope2 ..."}
 _resolved_scopes = {}
 
 
@@ -69,12 +127,15 @@ def _resolve_scopes(config: dict, scope_group: str) -> str:
     Resolve which scopes are actually granted for a scope group.
     Tries all scopes at once first; if that fails with invalid_scope,
     probes each scope individually to find which ones work.
-    Returns the space-joined string of granted scopes.
+    Returns the space-joined string of granted scopes (empty if none).
     """
     if scope_group in _resolved_scopes:
         return _resolved_scopes[scope_group]
 
-    all_scopes = PAYROLL_SCOPES if scope_group == "payroll" else ACCOUNTING_SCOPES
+    all_scopes = _SCOPE_LISTS.get(scope_group)
+    if not all_scopes:
+        raise ValueError(f"Unknown scope_group: {scope_group}")
+
     full_scope_str = " ".join(all_scopes)
 
     # Fast path: try all scopes at once
@@ -83,7 +144,6 @@ def _resolve_scopes(config: dict, scope_group: str) -> str:
         _resolved_scopes[scope_group] = full_scope_str
         return full_scope_str
 
-    # If the error isn't invalid_scope, it's a real auth problem — raise
     error_body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
     if error_body.get("error") != "invalid_scope":
         log.severe(f"Token request failed for {scope_group}: {resp.status_code} {resp.text}")
@@ -91,11 +151,9 @@ def _resolve_scopes(config: dict, scope_group: str) -> str:
 
     # Slow path: probe each scope individually
     log.warning(f"Some {scope_group} scopes are not authorised — probing individually...")
-    granted = []
-    denied = []
+    granted, denied = [], []
     for scope in all_scopes:
-        probe = _try_token(config, scope)
-        if probe.ok:
+        if _try_token(config, scope).ok:
             granted.append(scope)
         else:
             denied.append(scope)
@@ -111,9 +169,7 @@ def _resolve_scopes(config: dict, scope_group: str) -> str:
 
 
 def get_access_token(config: dict, scope_group: str = "accounting") -> str:
-    """Return a valid access token for the given scope group ('accounting' or 'payroll')."""
-    global _tokens
-
+    """Return a valid access token for the given scope group."""
     cached = _tokens.get(scope_group)
     if cached:
         token, expiry = cached
@@ -140,63 +196,152 @@ def get_access_token(config: dict, scope_group: str = "accounting") -> str:
     return token
 
 
-def is_payroll_available(config: dict) -> bool:
+def _probe_endpoint(config: dict, scope_group: str, probe_url: str,
+                    feature_name: str, denial_hints: dict) -> bool:
     """
-    Test whether the Xero app has any payroll scopes authorised AND
-    the org's Custom Connection actually grants payroll API access AND
-    the connected organisation has Xero Payroll provisioned.
+    Generic probe: resolve scopes for a group, then GET a lightweight endpoint
+    to confirm the org actually grants API access (not just the OAuth scope).
 
-    Xero can issue a valid OAuth token with payroll scopes even when:
-      - the Custom Connection hasn't been re-authorized to include payroll
-        (token works, API returns 403), or
-      - the connected organisation doesn't have Xero Payroll provisioned
-        (token works, API returns 401 with a provisioning message).
-    We probe /Settings once to detect both cases before trying all endpoints.
+    Xero can issue a valid token whose scopes the org doesn't accept (e.g.
+    payroll token to a non-payroll org, or journals token to a non-Advanced-tier
+    customer). The token works but the API returns 401/403.
+    denial_hints maps status_code → log message to use on that specific denial.
     """
-    scope_str = _resolve_scopes(config, "payroll")
+    scope_str = _resolve_scopes(config, scope_group)
     if not scope_str:
         log.warning(
-            "No payroll scopes authorised for this Xero app — "
-            "skipping all payroll tables. To enable payroll sync, "
-            "add payroll scopes in the Xero developer portal."
+            f"No {scope_group} scopes authorised for this Xero app — "
+            f"skipping all {feature_name} tables."
         )
         return False
-
-    # Probe actual API access with a lightweight call
     try:
-        headers = get_headers(config, scope_group="payroll")
-        resp = requests.get(
-            "https://api.xero.com/payroll.xro/2.0/Settings",
-            headers=headers, timeout=15,
-        )
+        headers = get_headers(config, scope_group=scope_group)
+        resp = requests.get(probe_url, headers=headers, timeout=15)
+
+        # 429 is a rate-limit signal, NOT a "feature unavailable" signal —
+        # callers must not silently disable the feature. If the day budget
+        # is exhausted, abort the whole sync so the connector can resume
+        # next day with all features intact. If just the per-minute window
+        # is full, sleep through it and probe once more.
+        if resp.status_code == 429:
+            raw_retry = int(resp.headers.get("Retry-After", 60))
+            rate_problem = resp.headers.get("X-Rate-Limit-Problem", "")
+            if rate_problem == "day" or raw_retry > 120:
+                raise DailyRateLimitExceeded(
+                    f"Day limit exhausted during {feature_name} probe "
+                    f"(Retry-After={raw_retry}s, problem={rate_problem})."
+                )
+            log.warning(
+                f"{feature_name.title()} probe rate-limited (429). "
+                f"Sleeping {raw_retry}s and retrying once."
+            )
+            time.sleep(raw_retry)
+            resp = requests.get(probe_url, headers=headers, timeout=15)
+
         if resp.status_code == 200:
             return True
-        if resp.status_code == 401:
+        hint = denial_hints.get(resp.status_code)
+        if hint:
+            log.warning(f"{hint} Detail: {resp.text[:300]}")
+        else:
             log.warning(
-                "Payroll token obtained but API returned 401 Unauthorized. "
-                "The connected Xero organisation does not have Payroll "
-                "provisioned, or the connection lacks Payroll Administrator "
-                "permissions. Skipping all payroll tables. "
+                f"{feature_name.title()} probe returned unexpected status "
+                f"{resp.status_code}. Skipping all {feature_name} tables. "
                 f"Detail: {resp.text[:300]}"
             )
-            return False
-        if resp.status_code == 403:
-            log.warning(
-                "Payroll token obtained but API returned 403 Forbidden. "
-                "The Custom Connection likely needs re-authorization with "
-                "payroll scopes in the Xero developer portal "
-                "(My Apps → select app → re-authorize). "
-                "Skipping all payroll tables."
-            )
-            return False
-        log.warning(
-            f"Payroll probe returned unexpected status {resp.status_code}. "
-            f"Skipping all payroll tables. Detail: {resp.text[:300]}"
-        )
         return False
+    except DailyRateLimitExceeded:
+        raise
     except Exception as e:
-        log.warning(f"Could not verify payroll access: {e}. Skipping payroll tables.")
+        log.warning(f"Could not verify {feature_name} access: {e}. Skipping {feature_name} tables.")
         return False
+
+
+def is_payroll_available(config: dict) -> bool:
+    """True iff Xero Payroll is provisioned for the connected org AND
+    the Custom Connection has payroll scopes authorised."""
+    return _probe_endpoint(
+        config,
+        scope_group="payroll",
+        probe_url="https://api.xero.com/payroll.xro/2.0/Settings",
+        feature_name="payroll",
+        denial_hints={
+            401: ("Payroll token obtained but API returned 401 Unauthorized. "
+                  "The connected Xero organisation does not have Payroll "
+                  "provisioned, or the connection lacks Payroll Administrator "
+                  "permissions. Skipping all payroll tables."),
+            403: ("Payroll token obtained but API returned 403 Forbidden. "
+                  "The Custom Connection likely needs re-authorization with "
+                  "payroll scopes in the Xero developer portal. "
+                  "Skipping all payroll tables."),
+        },
+    )
+
+
+def is_journals_available(config: dict) -> bool:
+    """True iff the Custom Connection has accounting.journals.read authorised
+    AND the Xero org has Journals API access (Advanced pricing tier + security
+    review + use-case approval, per Xero policy effective April 2026)."""
+    return _probe_endpoint(
+        config,
+        scope_group="journals",
+        probe_url="https://api.xero.com/api.xro/2.0/Journals",
+        feature_name="journals",
+        denial_hints={
+            401: ("Journals token obtained but API returned 401 Unauthorized. "
+                  "Skipping accounting_journal* tables."),
+            403: ("Journals API returned 403 Forbidden. From April 2026 the "
+                  "/Journals endpoint requires the Advanced pricing tier "
+                  "($1,445 AUD/month), a security assessment, and use-case "
+                  "approval from Xero. Skipping accounting_journal* tables."),
+        },
+    )
+
+
+def is_assets_available(config: dict) -> bool:
+    """True iff the Xero org has Fixed Assets enabled.
+    The `assets.read` scope is bundled into the 'accounting' token, so we
+    probe the API directly — 403 here means the org-level feature is off."""
+    return _probe_endpoint(
+        config,
+        scope_group="accounting",
+        probe_url="https://api.xero.com/assets.xro/1.0/Settings",
+        feature_name="assets",
+        denial_hints={
+            403: ("Assets API returned 403 Forbidden. The connected Xero "
+                  "organisation does not have Fixed Assets enabled. "
+                  "Skipping assets tables."),
+            401: ("Assets API returned 401 Unauthorized. Skipping assets tables."),
+        },
+    )
+
+
+def is_files_available(config: dict) -> bool:
+    """True iff files.read is authorised for this Custom Connection."""
+    return _probe_endpoint(
+        config,
+        scope_group="files",
+        probe_url="https://api.xero.com/files.xro/1.0/Files?pagesize=1",
+        feature_name="files",
+        denial_hints={
+            401: "Files token obtained but API returned 401 Unauthorized. Skipping files tables.",
+            403: "Files API returned 403 Forbidden. Skipping files tables.",
+        },
+    )
+
+
+def is_projects_available(config: dict) -> bool:
+    """True iff projects.read is authorised for this Custom Connection."""
+    return _probe_endpoint(
+        config,
+        scope_group="projects",
+        probe_url="https://api.xero.com/projects.xro/2.0/Projects?pagesize=1",
+        feature_name="projects",
+        denial_hints={
+            401: "Projects token obtained but API returned 401 Unauthorized. Skipping projects tables.",
+            403: "Projects API returned 403 Forbidden. Skipping projects tables.",
+        },
+    )
 
 
 def get_tenant_id(config: dict) -> str:
@@ -209,12 +354,10 @@ def get_tenant_id(config: dict) -> str:
     if _tenant_id:
         return _tenant_id
 
-    # If explicitly provided in config, use that
     if config.get("tenant_id"):
         _tenant_id = config["tenant_id"]
         return _tenant_id
 
-    # Otherwise, fetch from connections endpoint (accounting token is sufficient)
     token = get_access_token(config, scope_group="accounting")
     response = requests.get(
         CONNECTIONS_URL,

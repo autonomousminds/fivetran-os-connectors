@@ -21,9 +21,17 @@ class RateLimitExceeded(Exception):
     pass
 
 
-# Breww doesn't publish a documented rate limit. Stay conservative.
-# A small inter-request delay prevents bursts that could trip an undocumented limiter.
-_MIN_INTERVAL = 0.05  # 20 req/s ceiling — well below any plausible Django/DRF default
+# Breww's documented rate limits (from the API description):
+#   - 60 requests/minute (soft — returns 429 with short Retry-After)
+#   - 5,000 requests/day  (hard — returns 429 with Retry-After up to ~19 hours)
+# We pace ourselves at ~57 req/min (1.05 s/req) to stay safely under the per-minute
+# limit and avoid wasting quota on retries. The daily limit constrains how OFTEN
+# the connector can run: with page_size=500 a full sync is roughly 700–1,000
+# requests (orphan recovery adds variable load on top), so the connector can
+# tolerate the occasional Fivetran-scheduled extra run within a 24h window —
+# any run that exhausts the daily quota soft-exits via `update()` rather than
+# erroring out (see connector.py).
+_MIN_INTERVAL = 1.05
 _last_request_ts = [0.0]
 
 
@@ -61,12 +69,20 @@ def api_request(config: dict, url: str, params: dict = None,
             log.severe(f"Auth error {sc} for {url}: {response.text[:300]}")
             response.raise_for_status()
         if sc == 429:
+            # Short Retry-After ≈ per-minute soft limit (60 req/min). Sleep and retry.
+            # Long Retry-After ≈ daily quota exhausted (5,000 req/day). Abort with a
+            # descriptive message — Fivetran will resume from the last checkpoint on
+            # the next scheduled run.
             MAX_RETRY_AFTER = 300
             retry_after = int(response.headers.get("Retry-After", 30))
             if retry_after > MAX_RETRY_AFTER:
+                hours = retry_after / 3600
                 raise RateLimitExceeded(
-                    f"Rate-limited with Retry-After={retry_after}s. "
-                    f"Aborting — will resume from checkpoint."
+                    f"Breww daily quota exhausted (5,000 requests/24h). "
+                    f"Retry-After={retry_after}s (~{hours:.1f} hours). "
+                    f"Aborting — Fivetran will resume from the last checkpoint on "
+                    f"the next scheduled run. Ensure the connector is scheduled at "
+                    f"most once per 24 hours."
                 )
             log.warning(f"429 for {url}. Sleeping {retry_after}s")
             time.sleep(retry_after)
@@ -83,7 +99,12 @@ def api_request(config: dict, url: str, params: dict = None,
 
 
 def fetch_all_pages(config: dict, endpoint: str, params: dict = None,
-                    page_size: int = 100):
+                    page_size: int = 200):
+    # Breww silently caps page_size at 200 regardless of request value
+    # (verified by curl: page_size=500/1000/5000 all return exactly 200 rows).
+    # We request 200 explicitly to match Breww's ceiling — over-requesting
+    # wastes nothing, but documenting the cap here so future changes don't
+    # accidentally believe page_size=500 is doing anything.
     """
     Generator yielding raw API records across all pages.
 

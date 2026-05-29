@@ -1,0 +1,23 @@
+{
+    "client_id": "1000.XXXXXXXXXXXXXXXXXXXXXX",
+    "client_secret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "refresh_token": "1000.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.xxxxxxxxxxxxxxxxxxxx",
+    "data_center": "eu",
+
+    "attendance_past_window_days": "180",
+    "shift_mappings_past_window_days": "60",
+    "leave_past_window_days": "365",
+    "leave_future_window_days": "365",
+    "timelog_past_window_days": "180",
+    "timesheets_past_window_days": "180",
+    "holidays_past_window_days": "365",
+    "holidays_future_window_days": "730",
+
+    "sync_lms_courses": "false",
+    "sync_attendance_entries": "false",
+    "attendance_entries_past_window_days": "14",
+    "sync_attendance_latest_entries": "true",
+    "attendance_latest_entries_duration_minutes": "1440",
+
+    "skip_forms": ""
+}

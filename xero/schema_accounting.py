@@ -91,6 +91,15 @@ def get_accounting_schema() -> list:
                 "DiscountRate": "FLOAT",
             },
         },
+        {
+            "table": "accounting_bank_transaction_line_item_tracking",
+            "primary_key": ["BankTransactionID", "LineItemID", "TrackingCategoryID"],
+            "columns": {
+                "BankTransactionID": "STRING",
+                "LineItemID": "STRING",
+                "TrackingCategoryID": "STRING",
+            },
+        },
         # ── Bank Transfers ───────────────────────────────────────────────
         {
             "table": "accounting_bank_transfer",
@@ -356,6 +365,15 @@ def get_accounting_schema() -> list:
                 "IsBlank": "BOOLEAN",
             },
         },
+        {
+            "table": "accounting_manual_journal_line_tracking",
+            "primary_key": ["ManualJournalID", "LineItemID", "TrackingCategoryID"],
+            "columns": {
+                "ManualJournalID": "STRING",
+                "LineItemID": "STRING",
+                "TrackingCategoryID": "STRING",
+            },
+        },
         # ── Overpayments ─────────────────────────────────────────────────
         {
             "table": "accounting_overpayment",
@@ -381,6 +399,15 @@ def get_accounting_schema() -> list:
                 "UnitAmount": "FLOAT",
                 "TaxAmount": "FLOAT",
                 "LineAmount": "FLOAT",
+            },
+        },
+        {
+            "table": "accounting_overpayment_line_item_tracking",
+            "primary_key": ["OverpaymentID", "LineItemID", "TrackingCategoryID"],
+            "columns": {
+                "OverpaymentID": "STRING",
+                "LineItemID": "STRING",
+                "TrackingCategoryID": "STRING",
             },
         },
         # ── Payments ─────────────────────────────────────────────────────
@@ -422,6 +449,15 @@ def get_accounting_schema() -> list:
                 "UnitAmount": "FLOAT",
                 "TaxAmount": "FLOAT",
                 "LineAmount": "FLOAT",
+            },
+        },
+        {
+            "table": "accounting_prepayment_line_item_tracking",
+            "primary_key": ["PrepaymentID", "LineItemID", "TrackingCategoryID"],
+            "columns": {
+                "PrepaymentID": "STRING",
+                "LineItemID": "STRING",
+                "TrackingCategoryID": "STRING",
             },
         },
         # ── Purchase Orders ──────────────────────────────────────────────

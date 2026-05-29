@@ -1,0 +1,8 @@
+{
+    "client_id": "1000.XXXXXXXXXXXXXXXXXXXXXX",
+    "client_secret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "refresh_token": "1000.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.xxxxxxxxxxxxxxxxxxxx",
+    "account_owner_name": "your_workspace_name",
+    "data_center": "eu",
+    "prefer_bulk_read": "false"
+}

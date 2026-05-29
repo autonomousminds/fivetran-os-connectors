@@ -20,13 +20,13 @@ arrays that have no top-level endpoint of their own.
 `business_details`, `sites`, `locations`, `users`
 
 ### Commercial / CRM
-`orders`†, `order_lines`, `order_adjustment_lines`, `customers_suppliers`‡, `contacts`, `customer_types`, `customer_delivery_windows`, `credit_notes`‡, `credit_note_lines`, `credit_note_allocations`, `customer_payments`, `payments`, `tax_rates`, `deals`, `crm_activities`‡, `crm_activity_types`
+`orders`†, `order_lines`, `order_adjustment_lines`, `customers_suppliers`, `contacts`, `customer_types`, `customer_delivery_windows`, `credit_notes`, `credit_note_lines`, `credit_note_allocations`, `customer_payments`, `payments`, `tax_rates`, `deals`, `crm_activities`, `crm_activity_types`
 
 ### Inventory / supply
-`products`, `stock_items`, `stock_received`, `inventory_receipts`‡, `purchase_orders`‡, `supplier_invoices`‡, `container_types`, `nr_container_brands`, `goods_in_document_pools`, `fulfillments`
+`products`, `stock_items`, `stock_received`, `inventory_receipts`, `purchase_orders`, `supplier_invoices`, `container_types`, `nr_container_brands`, `goods_in_document_pools`, `fulfillments`
 
 ### Production
-`drinks`, `drink_batches`‡, `drink_batch_actions`‡, `drink_batch_stock_items_used`‡, `ingredient_batches`, `ingredient_batch_actions`‡, `ingredient_batch_stock_items_used`, `fermentation_readings`, `vessels`, `planned_packagings`‡
+`drinks`, `drink_batches`, `drink_batch_actions`, `drink_batch_stock_items_used`, `ingredient_batches`, `ingredient_batch_actions`, `ingredient_batch_stock_items_used`, `fermentation_readings`, `vessels`, `planned_packagings`
 
 ### Child tables (extracted from parent nested arrays)
 | Table | Parent | FK column | Why |
@@ -37,9 +37,14 @@ arrays that have no top-level endpoint of their own.
 | `order_payments_refunds` | `orders` | `order_id` | Per-refund detail (parent payment, method, amount) — not exposed via `/payments/` |
 
 Legend:
-- **†** True incremental on `last_modified_at` (captures edits as well as new rows). Only `orders` exposes this filter.
-- **‡** Incremental on `created_at` / `created_on` (captures only new rows; edits after creation are not picked up).
-- *(unmarked)* Full re-sync each run — the endpoint exposes no date filter. Most are small reference tables.
+- **†** True incremental on `last_modified_at`. Only `orders` exposes this
+  filter — it captures both new rows and edits.
+- *(unmarked)* Full re-sync each run. Breww exposes `created_at` /
+  `created_on` filters on 10 of these resources, but a created-only cursor
+  would miss edits to existing records (customer renames, PO revisions,
+  batch volume corrections, etc.). We deliberately accept the extra sync
+  time (~10–15 min for ~37k extra records pulled per run) so every edit
+  is captured.
 
 All top-level tables use `id` as the primary key. Child tables use `id`
 where the upstream array element has one, otherwise a composite PK
@@ -87,6 +92,88 @@ tables. The full set of rules in helpers.py:
    arrays on `/orders/` records are dropped from the orders row because those
    resources have their own top-level endpoints (`/order-lines/`,
    `/order-adjustment-lines/`) — they're synced as their own tables.
+
+## Orphan recovery (hidden-record handling)
+
+Breww's list endpoints silently filter out records that the detail endpoints
+still serve, in two distinct patterns:
+
+1. **Soft-delete** — `/customers-suppliers/` and `/users/` omit records with
+   a `deleted` timestamp. Without mitigation, ~30% of orders reference
+   customer_ids that aren't in `customers_suppliers` (churned customers,
+   WooCommerce/Eebria gateway accounts, archived locations).
+2. **Hidden-filter** — `/stock-items/` and `/container-types/` omit records
+   that look perfectly active (`obsolete=False`, `deleted=None`) for reasons
+   Breww doesn't expose. Affected records include fundamental brewing
+   formats like "440ml Can", "9G Firkin", "Grain - Golden Promise Malt".
+   None of `?id__in=`, `?obsolete__in=true,false`, `?include_obsolete=true`,
+   `?show_all=true` exposes them — only the detail endpoint does.
+
+After all primary syncs complete the connector runs a **post-sync orphan
+recovery pass**:
+
+1. Every FK reference written by `upsert` is registered in-memory by column
+   name (`customer_id`, `created_by_id`, `parent_company_id`, `sales_person_id`,
+   `updater_id`, `approver_id`, `rejecter_id`, `canceler_id`, `deleter_id`,
+   `completed_by_id`, `stock_item_id`, `container_type_id`).
+2. The set of referenced ids is diffed against the ids successfully written
+   to each parent table during the same run.
+3. Each missing id is fetched via its detail endpoint and upserted with the
+   standard `flatten_record` transform. Recovery loops up to 3 iterations
+   to catch second-order orphans (e.g. a recovered customer's `created_by_id`
+   pointing to an ex-employee user).
+
+Recovery targets: `customers_suppliers`, `users`, `stock_items`,
+`container_types`. Recovered customer rows carry a non-null `deleted`
+timestamp — filter `WHERE deleted IS NULL` for "active only" BI views.
+
+Cost: roughly one detail GET per orphan id. On a fresh sync of a typical
+brewery (~750 active customers + ~750 historical + ~150 hidden stock-items
+and container-types + ~20 ex-employees), this adds ~1,700 API calls and
+~25 minutes of wall-clock time. Subsequent incremental runs only recover
+ids newly referenced since the last sync, so the overhead drops to near
+zero in steady state.
+
+## Redundant fields dropped from parent records
+
+To avoid storing the same data twice in the warehouse, the connector drops
+three nested fields from their parent records:
+
+| Parent | Field dropped | Data available via |
+|---|---|---|
+| `customers_suppliers` | `contacts` | `/contacts/` table (1:M with `customer_id` FK) |
+| `customers_suppliers` | `delivery_windows` | always emitted as empty `{}` by Breww; the actual configuration ID is preserved as `delivery_windows_id` (FK to `customer_delivery_windows` table) |
+| `customer_payments` | `order_allocations` | `/payments/` table — each row is one `(customer_payment, order)` allocation |
+
+Empty `{}` dicts on any field are skipped instead of being stored as a
+literal `'{}'` column value — saves cruft on optional nested-config fields.
+
+## Known limitations
+
+- **Integer-encoded status columns** — `orders.order_status` and
+  `orders.payment_status` are integer codes (e.g. `3` = "Confirmed",
+  `4` = "Completed") with no lookup table exposed by the Breww API.
+  Document the mapping in your dbt models or BI tool. Observed distribution:
+
+  | order_status | payment_status |
+  |---|---|
+  | 3 = bulk of orders (≈95%) | 3 = bulk (≈95%) |
+  | 4 = secondary (~4%) | 1 ≈ 3% |
+  | 5 = small (~0.2%) | 2 ≈ 1% |
+
+  These are uniform across breweries, but Breww does not publish the
+  enum. Contact your Breww account manager for the authoritative mapping.
+
+- **`fulfillments.order_id` is null for 100% of `UPLIFT_ULLAGE` rows** —
+  this is the correct upstream shape (ullage collection runs are standalone
+  events not tied to a sales order). Filter with
+  `WHERE type != 'UPLIFT_ULLAGE'` for delivery-style analytics.
+
+- **No `last_modified_at` on most resources** — only `/orders/` exposes a
+  modified-since filter. To still capture edits on the remaining 43 tables,
+  the connector full-resyncs them on every run rather than relying on a
+  `created_at` cursor (which would silently miss edits). The trade-off is
+  a slower sync (~75–90 min total instead of ~60).
 
 ## Setup
 
@@ -175,9 +262,41 @@ breww/
 
 ## Operational notes
 
-- The Breww API publishes no rate-limit headers. The client throttles itself to a max of ~20 req/s and retries 429s using the `Retry-After` header (capped at 300 s — beyond that the sync aborts and resumes from checkpoint next run).
-- Checkpoints are emitted every 1000 records per table plus at the end of each table, so a long initial sync (e.g. `orders` at 35k+ rows) is resumable.
-- Accountancy-sync endpoints (`/accountancy-sync-*/{auth_id}/…`) are excluded — they are write-back workflows that require an `auth_id` and are not ingest data.
+### Rate limits — IMPORTANT
+
+Breww's documented public-API rate limits are:
+
+- **60 requests per minute** (soft — returns 429 with short `Retry-After`)
+- **5,000 requests per day** (hard — returns 429 with `Retry-After` up to ~19 hours)
+
+The connector throttles itself to **~57 req/min** (1.05 s between requests)
+to stay safely under the per-minute ceiling without wasting quota on
+retries.
+
+A full initial sync of a typical brewery (~290k records across 44 tables,
+plus ~940 orphan-recovery detail GETs) is approximately **3,500–4,800
+requests**. That fits inside the 5,000/day quota, but with little margin.
+
+**The connector MUST be scheduled at most once per 24 hours.** Faster
+schedules will exhaust the daily quota mid-sync, abort with a SEVERE
+log line ("Breww daily quota exhausted"), and resume from the last
+checkpoint on the next scheduled run — but you'll never catch up.
+
+Steady-state cost on subsequent runs is lower because:
+- `orders` uses the `last_modified_at` cursor, so only edited rows pull
+- Orphan recovery only fetches *newly-referenced* missing ids
+
+A daily schedule is the right default.
+
+### Other notes
+
+- Checkpoints are emitted every 100 records per table plus at the end of
+  each table, so a long initial sync (e.g. `orders` at 35k+ rows) is fully
+  resumable. If a sync aborts (rate limit, network error), the next run
+  picks up where the last checkpoint left off.
+- Accountancy-sync endpoints (`/accountancy-sync-*/{auth_id}/…`) are
+  excluded — they are write-back workflows that require an `auth_id` and
+  are not ingest data.
 
 ## Source
 

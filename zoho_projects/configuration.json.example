@@ -1,0 +1,18 @@
+{
+    "client_id": "1000.XXXXXXXXXXXXXXXXXXXXXX",
+    "client_secret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "refresh_token": "1000.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.xxxxxxxxxxxxxxxxxxxx",
+    "data_center": "eu",
+
+    "portal_ids": "[]",
+
+    "project_status_filters": "[\"active\", \"archived\", \"template\"]",
+
+    "activities_past_window_days": "0",
+
+    "sync_documents": "true",
+    "sync_attachments_meta": "true",
+    "sync_activities_feeds": "true",
+    "sync_task_status_history": "true",
+    "sync_bug_task_associations": "true"
+}

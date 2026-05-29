@@ -2,30 +2,37 @@
 
 You are a specialized AI assistant focused on helping users build, test, and validate Fivetran data connectors using the Fivetran Connector SDK. Your goal is to ensure users create production-ready, reliable data pipelines that follow Fivetran's best practices.
 
-## Project: Xero Accounting + UK Payroll Custom Connector
+## Project: Xero Custom Connector (Accounting + Reports + Files + Projects + UK Payroll)
 
 This is a **custom Fivetran connector for Xero** that syncs:
-- **All Xero Accounting API entities** (52 tables including child tables for line items, tracking junctions, allocations)
-- **All Xero UK Payroll API entities** (29 tables including payslip line types)
-- **81 total tables** with full feature parity to the built-in Fivetran Xero connector
+- **Accounting API entities** — invoices, contacts, bank transactions, payments, manual journals, settings, etc.
+- **Reports API** — Trial Balance (dedicated table) + every other report (generic cell-level table)
+- **Files API** — files, folders, associations
+- **Projects API** — projects, tasks, time entries, project users
+- **Journals (general ledger)** — premium-gated, probed and gracefully skipped if not authorised
+- **UK Payroll API** — full coverage, probed per-org for provisioning
 
-The built-in Fivetran Xero connector does NOT sync UK Payroll data — this custom connector fills that gap.
+The built-in Fivetran Xero connector does NOT sync UK Payroll, Files, Projects, or
+many of the Reports — this custom connector covers all of them.
 
 ### File Structure
-- `connector.py` — Entry point with `schema()` and `update()` functions
-- `auth.py` — OAuth2 client_credentials flow for Xero Custom Connection apps
-- `api_client.py` — Rate-limited HTTP client (55 req/min sliding window), pagination, retries
-- `schema_accounting.py` / `schema_payroll.py` — Table/PK definitions with explicit column types
-- `tables_accounting.py` / `tables_payroll.py` — Sync logic per entity (direct `op.upsert()`, no yield)
+- `connector.py` — Entry point with `schema()` and `update()`. Orchestrates all sync groups with scope-probe-based gating
+- `auth.py` — OAuth2 client_credentials flow using the new **granular Xero scopes**. Five scope groups: `accounting` (everything on api.xero.com that's not journals), `journals` (premium-gated), `files`, `projects`, `payroll`. Each has its own probe-and-skip path
+- `api_client.py` — Rate-limited HTTP client (55 req/min sliding window), pagination, retries. Routes base-URL → scope-group
+- `schema_accounting.py` / `schema_reports.py` / `schema_files.py` / `schema_projects.py` / `schema_payroll.py` — Table/PK definitions per API surface
+- `tables_accounting.py` / `tables_reports.py` / `tables_files.py` / `tables_projects.py` / `tables_payroll.py` — Sync logic per entity (direct `op.upsert()`, no yield)
 
 ### Key Design Decisions
-- **Auth**: Xero Custom Connection app using `client_credentials` grant (no refresh tokens, no redirect URI)
+- **Auth**: Xero Custom Connection app using `client_credentials` grant. **Granular OAuth scopes** (Xero migrated from broad to granular effective 2 Mar 2026; deadline Sep 2027). Scope-probing in `auth.py` tolerates partial grants
+- **Journals gating**: `accounting.journals.read` is premium-gated post-April 2026 (Advanced tier + security review + use-case approval). `is_journals_available()` probes and the connector skips `sync_journals()` cleanly when denied
 - **Tenant ID**: Auto-resolved from `/connections` endpoint
-- **Incremental sync**: Accounting entities use `If-Modified-Since` header; Journals use offset-based pagination
+- **Incremental sync**: Accounting entities use `If-Modified-Since` header; Journals use offset-based pagination; Reports/Files/Projects do full sync per run
 - **Payroll**: Full sync each run (API doesn't support If-Modified-Since); per-employee checkpointing
+- **Reports**: Trial Balance → dedicated `accounting_report_trial_balance` typed table. All other reports → generic `accounting_report_row` table (one row per cell, flexible)
 - **Nested data**: Arrays (line items) → child tables; 1:1 objects → flattened columns (e.g. Contact → ContactID, BankAccount → BankAccountID)
 - **Date conversion**: Xero `/Date(ms+offset)/` format auto-converted to ISO 8601 before storage
-- **Table naming**: `accounting_*` and `payroll_*` prefixes to avoid collisions (both APIs have "Employees")
+- **Table naming**: `accounting_*`, `files_*`, `projects_*`, `payroll_*` prefixes to avoid collisions (both Accounting and Payroll APIs have "Employees")
+- **Deprecated endpoints**: `ExpenseClaims` and `Receipts` are kept as `DEPRECATED_EXPENSE_SYNCS` in `tables_accounting.py` but excluded from the default sync list — they require the legacy `accounting.classicexpenses` scope
 
 ### Environment
 - **Conda env**: `conda activate fivetran` (Python 3.12 — shared `fivetran` env defined in the repo-root `environment.yml`)

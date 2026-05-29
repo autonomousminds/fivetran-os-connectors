@@ -8,7 +8,21 @@ from fivetran_connector_sdk import Operations as op
 
 XERO_DATE_RE = re.compile(r'/Date\((\d+)([+-]\d{4})?\)/')
 
-STATE_VERSION = "2"  # bumped to force re-sync after pagination fix
+STATE_VERSION = "5"  # bumped to backfill: (3) line items on credit_notes
+                     # /overpayments/prepayments after fetch_all_pages fix;
+                     # archived tracking_categories; (4) purchase_orders
+                     # pagination, archived contacts, contact_group members,
+                     # and tracking junctions on bank_tx / manual_journal /
+                     # overpayment / prepayment line items; (5) explicit
+                     # order=UpdatedDateUTC ASC on all paginated incremental
+                     # syncs — guarantees cursor advancement is monotonic so
+                     # a sync interrupted by the daily 5000-call limit
+                     # resumes from where it stopped with no gap. Without
+                     # explicit ordering, Xero's default page order isn't
+                     # guaranteed to be ASC by UpdatedDateUTC, and a partial
+                     # sync can advance the cursor past unprocessed older
+                     # records, losing them permanently until the next state
+                     # bump.
 
 # Checkpoint every N records in large paginated syncs (best practice: ~1000)
 CHECKPOINT_INTERVAL = 1000

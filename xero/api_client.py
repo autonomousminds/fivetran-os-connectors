@@ -10,14 +10,31 @@ import requests
 from fivetran_connector_sdk import Logging as log
 
 from auth import get_headers
+from exceptions import DailyRateLimitExceeded
 
-class DailyRateLimitExceeded(Exception):
-    """Raised when Xero's daily API call quota is exhausted."""
-    pass
+# Re-exported so existing `from api_client import DailyRateLimitExceeded`
+# callers (connector.py) keep working without churn.
+__all__ = ["DailyRateLimitExceeded"]
 
 
 ACCOUNTING_BASE = "https://api.xero.com/api.xro/2.0"
 PAYROLL_BASE = "https://api.xero.com/payroll.xro/2.0"
+FILES_BASE = "https://api.xero.com/files.xro/1.0"
+PROJECTS_BASE = "https://api.xero.com/projects.xro/2.0"
+
+
+def _default_scope_group(base_url: str) -> str:
+    """Map a Xero base URL to the scope group whose token authorizes it.
+    Used as a fallback when callers don't pass scope_group explicitly.
+    Accounting endpoints split between 'accounting' (most things) and
+    'journals' (the GL endpoint) — callers must specify for /Journals."""
+    if base_url == PAYROLL_BASE:
+        return "payroll"
+    if base_url == FILES_BASE:
+        return "files"
+    if base_url == PROJECTS_BASE:
+        return "projects"
+    return "accounting"
 
 # Rate limiter: sliding window
 _call_timestamps = []
@@ -112,29 +129,38 @@ def api_request(config: dict, url: str, params: dict = None,
 def fetch_all_pages(config: dict, endpoint: str, entity_key: str,
                     base_url: str = ACCOUNTING_BASE,
                     modified_since: str = None,
-                    page_size: int = 500):
+                    page_size: int = 500,
+                    params_extra: dict = None):
     """
     Generator: iterate all records across pages without buffering the full dataset.
     Yields individual records one at a time; each page is freed after processing.
 
     Xero Accounting API supports pageSize up to 1000 (default 100).
-    Only a few Accounting endpoints support pagination: Invoices, Contacts,
-    BankTransactions, ManualJournals. All Payroll endpoints support it.
-    Callers must ensure this function is only used for paginated endpoints.
+    Paginated endpoints include: Invoices, Contacts, BankTransactions,
+    ManualJournals, CreditNotes, Overpayments, Prepayments, PurchaseOrders.
+    All Payroll endpoints support it.
+
+    IMPORTANT: For Invoices, CreditNotes, Overpayments, Prepayments,
+    BankTransactions and similar, calling WITHOUT the `page` parameter
+    returns summary records (no LineItems). Pagination is required to
+    get the full record. Don't use `fetch_all_no_pagination` for these.
 
     Termination: stop when a page returns fewer than page_size records.
     """
     url = f"{base_url}{endpoint}"
-    scope_group = "payroll" if base_url == PAYROLL_BASE else "accounting"
+    scope_group = _default_scope_group(base_url)
     page = 1
     headers_extra = {}
     if modified_since:
         headers_extra["If-Modified-Since"] = modified_since
 
     while True:
+        params = {"page": page, "pageSize": page_size}
+        if params_extra:
+            params.update(params_extra)
         data = api_request(
             config, url,
-            params={"page": page, "pageSize": page_size},
+            params=params,
             headers_extra=headers_extra if headers_extra else None,
             scope_group=scope_group,
         )
@@ -151,7 +177,7 @@ def fetch_all_no_pagination(config: dict, endpoint: str, entity_key: str,
                             modified_since: str = None) -> list:
     """Fetch all records from a non-paginated endpoint (single GET)."""
     url = f"{base_url}{endpoint}"
-    scope_group = "payroll" if base_url == PAYROLL_BASE else "accounting"
+    scope_group = _default_scope_group(base_url)
     headers_extra = {}
     if modified_since:
         headers_extra["If-Modified-Since"] = modified_since
@@ -164,22 +190,27 @@ def fetch_all_no_pagination(config: dict, endpoint: str, entity_key: str,
 
 
 def fetch_single(config: dict, endpoint: str,
-                 base_url: str = ACCOUNTING_BASE) -> dict:
+                 base_url: str = ACCOUNTING_BASE,
+                 scope_group: str = None,
+                 params: dict = None) -> dict:
     """Fetch a single resource (no pagination)."""
     url = f"{base_url}{endpoint}"
-    scope_group = "payroll" if base_url == PAYROLL_BASE else "accounting"
-    return api_request(config, url, scope_group=scope_group)
+    sg = scope_group or _default_scope_group(base_url)
+    return api_request(config, url, params=params, scope_group=sg)
 
 
 def fetch_journals(config: dict, offset: int = 0):
     """
     Generator for Journals (offset-based pagination).
     Yields (page_records, new_offset) tuples per page to allow per-page checkpointing.
+
+    Uses the 'journals' scope group — accounting.journals.read is a separate,
+    premium-gated scope (Advanced tier post-April 2026).
     """
     url = f"{ACCOUNTING_BASE}/Journals"
 
     while True:
-        data = api_request(config, url, params={"offset": offset})
+        data = api_request(config, url, params={"offset": offset}, scope_group="journals")
         records = data.get("Journals", [])
         offset += len(records)
         yield records, offset
